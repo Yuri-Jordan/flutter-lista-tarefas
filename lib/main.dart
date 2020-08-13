@@ -1,8 +1,6 @@
-import 'dart:convert';
-import 'dart:io';
-
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:italist/models/Tarefa.dart';
+import 'providers/tarefa-provider.dart';
 
 void main() {
   runApp(MaterialApp(title: "Lista de Tarefas", home: Home()));
@@ -14,19 +12,61 @@ class Home extends StatefulWidget {
 }
 
 class _HomeState extends State<Home> {
-  List _todoList = [];
-  Map<String, dynamic> _lastRemoved = Map();
+  List<Tarefa> _todoList = List<Tarefa>();
+  Tarefa _lastRemoved;
   int _lastRemovedPos;
+  bool _carregandoDados;
+  final _form = GlobalKey<FormState>();
+
+  TarefaProvider _tarefaProvider = new TarefaProvider();
 
   TextEditingController _todoController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    _readData().then((data) {
+    this.buscarTarefas();
+  }
+
+  buscarTarefas() {
+    setState(() {
+      _carregandoDados = false;
+    });
+
+    _tarefaProvider
+        .buscarTodasTarefas()
+        .then((data) => setState(() {
+              _todoList = data;
+              _carregandoDados = false;
+
+              _todoList.sort((a, b) {
+                if (a.feita && !b.feita)
+                  return 1;
+                else if (!a.feita && b.feita)
+                  return -1;
+                else
+                  return 0;
+              });
+            }))
+        .catchError((onError) {
       setState(() {
-        _todoList = json.decode(data);
+        _carregandoDados = false;
       });
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text('Ocorreu um erro!'),
+          content: Text("Erro ao carregar suas Tarefas!"),
+          actions: <Widget>[
+            FlatButton(
+              child: Text('Ok'),
+              onPressed: () {
+                Navigator.of(ctx).pop();
+              },
+            )
+          ],
+        ),
+      );
     });
   }
 
@@ -38,38 +78,53 @@ class _HomeState extends State<Home> {
         backgroundColor: Colors.blueAccent,
         centerTitle: true,
       ),
-      body: Column(
-        children: <Widget>[
-          Container(
-            padding: EdgeInsets.fromLTRB(17.0, 1.0, 7.0, 1.0),
-            child: Row(
+      body: _carregandoDados
+          ? Center(child: CircularProgressIndicator())
+          : Column(
               children: <Widget>[
-                Expanded(
-                  child: TextField(
-                    controller: _todoController,
-                    decoration: InputDecoration(
-                      labelText: "Nova Tarefa",
-                      labelStyle: TextStyle(color: Colors.blueAccent),
-                    ),
+                Container(
+                  padding: EdgeInsets.fromLTRB(17.0, 1.0, 7.0, 1.0),
+                  child: Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Form(
+                          key: _form,
+                          child: TextFormField(
+                            controller: _todoController,
+                            decoration: InputDecoration(
+                              labelText: "Nova Tarefa",
+                              labelStyle: TextStyle(color: Colors.blueAccent),
+                            ),
+                            validator: (value) {
+                              if (value.trim().isEmpty) {
+                                return 'Por favor insira um nome para a tarefa.';
+                              }
+                              return null;
+                            },
+                          ),
+                        ),
+                      ),
+                      RaisedButton(
+                        child: Icon(Icons.add),
+                        color: Colors.blueAccent,
+                        textColor: Colors.white70,
+                        onPressed: addTodo,
+                        disabledColor: Colors.grey,
+                      )
+                    ],
                   ),
                 ),
-                RaisedButton(
-                  color: Colors.blueAccent,
-                  child: Text("ADD"),
-                  textColor: Colors.white70,
-                  onPressed: addTodo,
-                )
+                Expanded(
+                  child: RefreshIndicator(
+                    onRefresh: _refresh,
+                    child: ListView.builder(
+                        padding: EdgeInsets.only(top: 10.0),
+                        itemCount: _todoList.length,
+                        itemBuilder: buildItem),
+                  ),
+                ),
               ],
             ),
-          ),
-          Expanded(
-            child: RefreshIndicator(onRefresh: _refresh, child: ListView.builder(
-                padding: EdgeInsets.only(top: 10.0),
-                itemCount: _todoList.length,
-                itemBuilder: buildItem),),
-          ),
-        ],
-      ),
     );
 
     return screen;
@@ -90,10 +145,10 @@ class _HomeState extends State<Home> {
       ),
       direction: DismissDirection.startToEnd,
       child: CheckboxListTile(
-        title: Text(_todoList[index]["title"]),
-        value: _todoList[index]["ok"],
+        title: Text(_todoList[index].titulo),
+        value: _todoList[index].feita,
         secondary: CircleAvatar(
-          child: Icon(_todoList[index]["ok"] ? Icons.check : Icons.error),
+          child: Icon(_todoList[index].feita ? Icons.check : Icons.error),
         ),
         onChanged: (c) {
           checkTodo(index, c);
@@ -101,82 +156,72 @@ class _HomeState extends State<Home> {
       ),
       onDismissed: (direction) {
         setState(() {
-          _lastRemoved = Map.from(_todoList[index]);
+          _lastRemoved = _todoList[index];
           _lastRemovedPos = index;
           _todoList.removeAt(index);
-          _saveData();
+
+          var exclusaoDesfeita = false;
 
           final snack = SnackBar(
-            content: Text("Tarefa ${_lastRemoved["title"]} removida."),
+            content: Text("Tarefa ${_lastRemoved.titulo} removida."),
             action: SnackBarAction(
                 label: "Desfazer",
                 onPressed: () {
-                  setState(() {
-                    _todoList.insert(_lastRemovedPos, _lastRemoved);
-                    _saveData();
-                  });
+                  exclusaoDesfeita = true;
                 }),
             duration: Duration(seconds: 2),
           );
           Scaffold.of(context).removeCurrentSnackBar();
-          Scaffold.of(context).showSnackBar(snack);
+          Scaffold.of(context).showSnackBar(snack).closed.then((value) {
+            if (!exclusaoDesfeita) {
+              this.apagarTarefa(_lastRemoved).catchError((onError) {
+                setState(() {
+                  _todoList.insert(_lastRemovedPos, _lastRemoved);
+                });
+              });
+            } else {
+              setState(() {
+                _todoList.insert(_lastRemovedPos, _lastRemoved);
+              });
+            }
+          });
         });
       },
     );
   }
 
-  Future<File> _getFile() async {
-    final directory = await getApplicationDocumentsDirectory();
-    return File("${directory.path}/data.json");
-  }
-
-  Future<File> _saveData() async {
-    String data = json.encode(_todoList);
-    final file = await _getFile();
-    return file.writeAsString(data);
-  }
-
-  Future<String> _readData() async {
-    try {
-      final file = await _getFile();
-      return file.readAsString();
-    } catch (e) {
-      return null;
-    }
+  Future<void> apagarTarefa(Tarefa lastRemoved) {
+    return _tarefaProvider.apagarTarefa(_lastRemoved);
   }
 
   void addTodo() {
-    setState(() {
-      Map<String, dynamic> newTodo = Map();
-      newTodo["title"] = _todoController.text;
-      _todoController.text = "";
-      newTodo["ok"] = false;
-      _todoList.add(newTodo);
-      _saveData();
+    if (!_form.currentState.validate()) return;
+    _tarefaProvider
+        .adicionarTarefa(Tarefa(titulo: _todoController.text.trim()))
+        .then((tarefa) {
+      setState(() {
+        _todoList.add(tarefa);
+        _todoController.text = "";
+      });
     });
   }
 
-  void checkTodo(index, c) {
+  void checkTodo(index, bool c) {
     setState(() {
-      _todoList[index]["ok"] = c;
-      _saveData();
+      _todoList[index].feita = c;
+    });
+    _tarefaProvider.editarTarefa(_todoList[index]).catchError((onError) {
+      setState(() {
+        _todoList[index].feita = !c;
+      });
     });
   }
 
-  Future<Null> _refresh() async{
+  Future<Null> _refresh() async {
     await Future.delayed(Duration(seconds: 1));
 
-    setState(() {
-      _todoList.sort((a, b) {
-        if(a["ok"] && !b["ok"]) return 1;
-        else if(!a["ok"] && b["ok"]) return -1;
-        else return 0;
-      });
-
-      _saveData();
-    });
+    this.buscarTarefas();
 
     return null;
   }
-
 }
